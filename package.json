@@ -1,0 +1,94 @@
+{
+  "name": "tcp-server-sim",
+  "productName": "TCP服务端数据模拟",
+  "version": "1.0.6",
+  "description": "TCP 服务端数据模拟工具",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && node scripts/dev-electron.cjs\"",
+    "build": "vite build",
+    "start": "electron .",
+    "start:built": "npm run build && electron .",
+    "pack": "node scripts/pack.cjs"
+  },
+  "build": {
+    "appId": "com.hanschaoyun.tcpserversim",
+    "productName": "TCP服务端数据模拟",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "icon": "build/icon.png",
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://bnspic.oss-cn-guangzhou.aliyuncs.com/tcp-server-tool"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis-web",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "verifyUpdateCodeSignature": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "TCP服务端数据模拟",
+      "deleteAppDataOnUninstall": false,
+      "differentialPackage": true,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsisWeb": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "TCP服务端数据模拟",
+      "deleteAppDataOnUninstall": false,
+      "differentialPackage": true,
+      "artifactName": "${productName}-WebSetup-${version}.${ext}",
+      "appPackageUrl": "https://bnspic.oss-cn-guangzhou.aliyuncs.com/tcp-server-tool"
+    }
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "electron-updater": "^6.8.11",
+    "element-plus": "^2.9.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "vite": "^6.0.3",
+    "wait-on": "^8.0.1"
+  }
+}
