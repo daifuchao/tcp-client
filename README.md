@@ -1,16 +1,78 @@
 # TCP 服务端数据模拟（Vue3 + Element Plus + Electron）
 
-多服务端监听、周期发码、可编辑生码内容，支持按服务端开关输出按日期命名的 `.txt` 日志。
+多服务端 TCP 监听、PLC/读码器发码模拟、一键/定时发码、码包与日志。配置与安装目录分离，覆盖安装不丢数据。
 
 ## 功能
 
-- 多服务端配置（PLC / 读码器）：监听 IP、端口、前缀、码长度、周期等
-- **开启**后作为 TCP **服务端**监听，等待客户端接入
-- 生成码后可编辑内容再发送；支持定时发码、  导入码包
-- 配置持久化到 `%APPDATA%\HansChaoyun\TCPServerSim\config.json`（与安装目录分离，升级 .exe 不丢失）
-- 日志默认在「文档\tcp-server-logs」，路径可改
-- 每个服务端可单独勾选「输出日志」
-- 日志路径可编辑；文件名按 `YYYY-MM-DD.txt`
+### 设备与发码
+
+| 能力 | 说明 |
+| --- | --- |
+| 多服务端 | 类型 **PLC** / **读码器**：IP、端口、前缀、**后缀**、码长度、单次个数、周期、计划发码数等 |
+| TCP 服务端 | 设置里 **开启** 后监听，等待客户端连接；发送内容末尾统一加 `\r\n` |
+| 生码规则 | **前缀 + 码体**（码长按前缀类型自动判断）；码包优先；随机前段 + 流水尾；**启用 ID** / **后缀** |
+| 生成 / 发送 | 界面可编辑待发内容；**生成码**、单次 **发送**、**生码导出**（导出不带 ID） |
+| 定时发码 | 各设备卡片「定时发送码」独立开关；未参与一键发码的设备可在一键发送运行中照常定时 |
+| **一键发送** | 顶栏按钮；仅 **开启** 且勾选 **一键发码** 的设备参与；有 PLC 时按帧同步读码器与 PLC |
+| 码包 | **启用导入码** 后可导入 txt（内存队列，重启清空） |
+| 达计划提示 | 定时/一键发满 **计划发码数** 后界面提示并自动收尾 |
+
+### 界面与其它
+
+- 无边框窗口（标题栏拖拽、最小化/最大化/关闭；**F11** 全屏切换，全屏或最大化时标题栏按钮为「还原」；开发态 **F12** / Ctrl+Shift+I 开发者工具）
+- 每个服务端可单独 **输出日志**
+- 在线检查更新 / 差量下载 / 版本回退（设置内）
+
+## 配置保存
+
+- 路径：`%APPDATA%\HansChaoyun\TCPServerSim\config.json`（悬停主界面底部可查看完整路径）
+- **手动落盘**：主界面 **「保存配置」** 或设置弹窗 **「保存」**；改待发内容、生成码等会先提示「有未保存修改」
+- 启动时 **只恢复 TCP 监听**，不自动恢复定时发码 / 一键发码
+- 换机：复制 `config.json` 到新机同路径；码包、会话计数需重新导入 / 清零
+
+详见 [docs/配置与AppData持久化说明.md](docs/配置与AppData持久化说明.md)。
+
+## 日志
+
+- 默认目录：`文档\tcp-server-logs`（可在界面修改 **日志路径**）
+- 按日单文件：`YYYY-MM-DD.txt`
+- 生码导出 txt 与日志同目录
+
+## 项目结构
+
+仓库内主要目录（`node_modules/`、`dist/`、`release/`、`release-pack-*/` 为构建或打包产出，一般不提交）：
+
+```text
+tcp-client/
+├── electron/                 # Electron 主进程
+│   ├── main.cjs              # 窗口、TCP、定时/一键发码、IPC、config.json 读写
+│   ├── preload.cjs           # contextBridge → window.api
+│   ├── codegen.cjs           # 生码规则（PLC/读码器、码包、ID、后缀）
+│   └── updater.cjs           # electron-updater 检查/差量/回退
+├── src/                      # Vue 3 界面（Vite）
+│   ├── App.vue               # 主界面：设备卡、发码、保存配置、一键发送
+│   ├── components/
+│   │   └── SettingsDialog.vue  # 设置表、在线更新/回退
+│   ├── styles/app.css
+│   └── main.js
+├── scripts/
+│   ├── dev-electron.cjs      # npm run dev 时启动 Electron
+│   ├── pack.cjs              # 打包：版本号、nsis + nsis-web、release-pack-*
+│   └── update-versions-json.cjs  # 生成 versions.json（回退列表）
+├── docs/                     # 说明文档
+├── build/icon.png            # 应用图标（打包用）
+├── public/icon.png
+├── index.html
+├── vite.config.js
+└── package.json              # 依赖与 electron-builder 配置
+```
+
+运行时数据（不在仓库内）：
+
+| 路径 | 内容 |
+| --- | --- |
+| `%APPDATA%\HansChaoyun\TCPServerSim\config.json` | 设备配置、日志路径、更新地址 |
+| 用户配置的 `logPath` | 按日 `.txt` 日志、生码导出文件 |
 
 ## 启动
 
@@ -21,68 +83,46 @@ npm install
 npm run dev
 ```
 
+> 修改 `electron/main.cjs`、`preload.cjs` 后需 **重启** Electron；仅改 Vue 可热更新。
+
 ## 打包分发
 
 ```bash
 npm run pack
 ```
 
-完成后在 **`release-pack-YYYYMMDD/`**（每次打包单独目录，同日多次打包为 `release-pack-YYYYMMDD-2`）得到安装包，例如：
+完成后在 **`release-pack-YYYYMMDD/`**（同日多次为 `release-pack-YYYYMMDD-2`）得到安装包，例如：
 
-`release-pack-20261117/TCP服务端数据模拟-Setup-1.0.7.exe`
+`release-pack-20261118/TCP服务端数据模拟-Setup-1.0.x.exe`
 
-> `npm run build` 只生成前端 `dist/`，不会出安装包；安装包请用 **`npm run pack`**。
+> `npm run build` 只生成前端 `dist/`，不出安装包；安装包请用 **`npm run pack`**。
 
-**只需把这一个 Setup.exe 拷到其他电脑运行安装即可**，不必拷贝 `win-unpacked` 或其它文件。安装后会生成桌面/开始菜单快捷方式，程序自带运行时，目标电脑无需再装 Node。
+把 **Setup.exe** 拷到目标电脑安装即可；目标机无需 Node。安装后可从设置配置在线更新地址。
 
-## 在线更新（局部/差量）
+## 在线更新（差量 + 回退）
 
-打包会同时生成：
-
-- **完整安装包** `*-Setup-*.exe`：U 盘/离线首次安装
-- **Web 差量包** `*-WebSetup-*.exe` + `*.7z`：在线升级只拉变更块（HTTP Range），不整包下 90MB+ 的 Setup
-
-更新地址在 **设置 → 更新地址** 配置，并会写入 AppData。OSS 需支持单段 `Range`（阿里云默认支持）。
-
-### 1. 服务器上放哪些文件
-
-把 `npm run pack` 生成的这些文件放到同一个 HTTP 目录：
+打包会同时生成 **完整 Setup** 与 **WebSetup + .nsis.7z**（差量）。更新地址在 **设置 → 更新地址**，写入 AppData。
 
 | 文件 | 说明 |
 | --- | --- |
-| `latest.yml` | 更新清单（含 `packages`，指向 web 差量包） |
-| `TCP服务端数据模拟-WebSetup-x.y.z.exe` | 小体积 web 安装器 |
-| `*-x64.nsis.7z` | 应用包（差量下载主体，勿删旧版 7z） |
-| `versions.json` | 历史版本列表（建议上传；没有时客户端会自动探测旧 Setup） |
-| `TCP服务端数据模拟-Setup-x.y.z.exe` | 完整安装包（离线安装 / 版本回退） |
+| `latest.yml` | 当前版本清单（含 web 包信息） |
+| `*-WebSetup-*.exe` + `*.nsis.7z` | 在线差量升级 |
+| `versions.json` | 历史版本（回退列表） |
+| `*-Setup-*.exe` | 离线安装 / 回退整包 |
 
-默认更新目录（阿里云 OSS）：
+默认 OSS 根目录（**不要**末尾 `/`）：
 
 ```text
 https://bnspic.oss-cn-guangzhou.aliyuncs.com/tcp-server-tool/
-  latest.yml                          ← 必须是含 packages 的 web 清单
-  versions.json
-  TCP服务端数据模拟-WebSetup-1.0.4.exe
-  tcp-server-sim-1.0.4-x64.nsis.7z
-  TCP服务端数据模拟-Setup-1.0.4.exe   ← 离线/回退
-  （保留上一版 .nsis.7z / Setup）
 ```
 
-`npm run pack` 会把 `nsis-web/` 里的更新清单与差量包提升到输出根目录，上传根目录文件即可。
+发版：`npm run pack` → 上传上表文件 → 保留旧版 `.7z` / Setup 以便差量与回退。
 
-> Web 安装器会把包地址写成 `{publish.url}/{文件名}`。`publish.url` / `nsisWeb.appPackageUrl` **不要**带末尾 `/`，否则会变成 `tool//xxx.7z` 导致 404。
+完整说明见 [docs/在线更新功能说明.md](docs/在线更新功能说明.md)。
 
-### 2. 客户端
+## 文档
 
-- 升级：检查更新 → 下载更新（优先差量）→ 安装并重启  
-  首次从完整 Setup 装上后的**第一次**在线更新可能仍接近整包；之后版本间多为差量。
-- 回退：选择更低版本 → 回退并安装（下载对应完整 Setup）
-
-### 3. 发新版本流程
-
-1. `npm run pack`（自动 patch 自增 `version`，打 nsis + nsis-web，并更新 `versions.json`）
-2. 上传 `latest.yml`、`WebSetup`、`*.7z`、`versions.json`；完整 `Setup.exe` 也建议上传（离线/回退）
-3. **不要删旧版 `.7z` / Setup**，否则差量或回退会失败
-4. 已安装电脑打开设置检查更新即可
-
-> 修改 Electron 主进程后需重启 `npm run dev`。
+| 文档 | 内容 |
+| --- | --- |
+| [配置与 AppData 持久化说明](docs/配置与AppData持久化说明.md) | 读写时机、字段结构、换机备份 |
+| [在线更新功能说明](docs/在线更新功能说明.md) | OSS 布局、差量、回退、打包脚本 |

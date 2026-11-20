@@ -21,6 +21,15 @@
         </button>
       </div>
     </template>
+    <el-alert
+      v-if="locked"
+      class="lock-alert"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="运行中：一键发送或定时发码进行中，系统参数与设备管理不可改动、删除，请先停止后再修改"
+    />
+
     <div class="toolbar">
       <div class="toolbar-left">
         <span class="field-label">日志路径</span>
@@ -28,11 +37,12 @@
           :model-value="logPath"
           class="path-input"
           placeholder="请选择日志保存目录"
+          :disabled="locked"
           @update:model-value="emit('update:logPath', $event)"
         />
-        <el-button type="primary" @click="pickPath">选择</el-button>
+        <el-button type="primary" :disabled="locked" @click="pickPath">选择</el-button>
       </div>
-      <el-button type="primary" @click="addRow">
+      <el-button type="primary" :disabled="locked" @click="addRow">
         <el-icon class="btn-icon"><Plus /></el-icon>
         新增服务端
       </el-button>
@@ -45,19 +55,20 @@
           :model-value="updateUrl"
           class="path-input update-url-input"
           placeholder="https://bnspic.oss-cn-guangzhou.aliyuncs.com/tcp-server-tool/"
+          :disabled="locked"
           @update:model-value="emit('update:updateUrl', $event)"
         />
-        <el-button type="primary" :loading="checking" @click="onCheckUpdate">检查更新</el-button>
+        <el-button type="primary" :disabled="locked" :loading="checking" @click="onCheckUpdate">检查更新</el-button>
         <el-button
           type="primary"
           plain
-          :disabled="updateState !== 'available'"
+          :disabled="locked || updateState !== 'available'"
           :loading="downloading"
           @click="onDownloadUpdate"
         >
           下载更新
         </el-button>
-        <el-button type="success" :disabled="updateState !== 'downloaded'" @click="onInstallUpdate">
+        <el-button type="success" :disabled="locked || updateState !== 'downloaded'" @click="onInstallUpdate">
           安装并重启
         </el-button>
         <el-select
@@ -68,6 +79,7 @@
           filterable
           allow-create
           default-first-option
+          :disabled="locked"
           :loading="loadingVersions"
           @visible-change="onRollbackSelectVisible"
         >
@@ -81,7 +93,7 @@
         <el-button
           type="warning"
           plain
-          :disabled="!rollbackVersion"
+          :disabled="locked || !rollbackVersion"
           :loading="rollingBack"
           @click="onRollback"
         >
@@ -99,32 +111,32 @@
       <el-table :data="localServers" border height="560" style="width: 100%" class="settings-table">
         <el-table-column label="开启" width="70" align="center">
           <template #default="{ row }">
-            <el-switch v-model="row.enabled" />
+            <el-switch v-model="row.enabled" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="一键发码" width="90" align="center">
           <template #default="{ row }">
-            <el-switch v-model="row.enableBatch" />
+            <el-switch v-model="row.enableBatch" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="启用ID" width="80" align="center">
           <template #default="{ row }">
-            <el-switch v-model="row.enableId" />
+            <el-switch v-model="row.enableId" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="启用导入码" width="100" align="center">
           <template #default="{ row }">
-            <el-switch v-model="row.enableImport" />
+            <el-switch v-model="row.enableImport" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="输出日志" width="90" align="center">
           <template #default="{ row }">
-            <el-switch v-model="row.enableLog" />
+            <el-switch v-model="row.enableLog" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="类型" width="110" align="center">
           <template #default="{ row }">
-            <el-select v-model="row.type" class="compact-input">
+            <el-select v-model="row.type" class="compact-input" :disabled="locked">
               <el-option label="PLC" value="PLC" />
               <el-option label="读码器" value="读码器" />
             </el-select>
@@ -132,61 +144,98 @@
         </el-table-column>
         <el-table-column label="名称" min-width="120">
           <template #default="{ row }">
-            <el-input v-model="row.name" class="compact-input" />
+            <el-input v-model="row.name" class="compact-input" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="监听IP" min-width="130">
           <template #default="{ row }">
-            <el-input v-model="row.ip" class="compact-input" />
+            <el-input v-model="row.ip" class="compact-input" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="端口" width="100" align="center">
           <template #default="{ row }">
-            <el-input-number v-model="row.port" :controls="false" :min="1" :max="65535" class="compact-number" />
+            <el-input-number
+              v-model="row.port"
+              :controls="false"
+              :min="1"
+              :max="65535"
+              class="compact-number"
+              :disabled="locked"
+            />
           </template>
         </el-table-column>
         <el-table-column label="前缀" min-width="120">
           <template #default="{ row }">
-            <el-input v-model="row.prefix" class="compact-input" />
+            <el-input v-model="row.prefix" class="compact-input" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="后缀" min-width="100">
           <template #default="{ row }">
-            <el-input v-model="row.suffix" class="compact-input" placeholder="ID前拼接" />
+            <el-input v-model="row.suffix" class="compact-input" placeholder="ID前拼接" :disabled="locked" />
           </template>
         </el-table-column>
         <el-table-column label="码长度" width="90" align="center">
           <template #default="{ row }">
-            <el-input-number v-model="row.codeLength" :controls="false" :min="1" class="compact-number" />
+            <el-input-number
+              v-model="row.codeLength"
+              :controls="false"
+              :min="1"
+              class="compact-number"
+              :disabled="locked"
+            />
           </template>
         </el-table-column>
         <el-table-column label="单次发码个数" width="110" align="center">
           <template #default="{ row }">
-            <el-input-number v-model="row.sendCount" :controls="false" :min="1" class="compact-number" />
+            <el-input-number
+              v-model="row.sendCount"
+              :controls="false"
+              :min="1"
+              class="compact-number"
+              :disabled="locked"
+            />
           </template>
         </el-table-column>
         <el-table-column label="生码数" width="90" align="center">
           <template #default="{ row }">
-            <el-input-number v-model="row.generateCount" :controls="false" :min="1" class="compact-number" />
+            <el-input-number
+              v-model="row.generateCount"
+              :controls="false"
+              :min="1"
+              class="compact-number"
+              :disabled="locked"
+            />
           </template>
         </el-table-column>
         <el-table-column label="发码周期(ms)" width="110" align="center">
           <template #default="{ row }">
-            <el-input-number v-model="row.cycleMs" :controls="false" :min="100" class="compact-number" />
+            <el-input-number
+              v-model="row.cycleMs"
+              :controls="false"
+              :min="100"
+              class="compact-number"
+              :disabled="locked"
+            />
           </template>
         </el-table-column>
         <el-table-column label="计划发码数" width="100" align="center">
           <template #default="{ row }">
-            <el-input-number v-model="row.planCount" :controls="false" :min="0" class="compact-number" />
+            <el-input-number
+              v-model="row.planCount"
+              :controls="false"
+              :min="0"
+              class="compact-number"
+              :disabled="locked"
+            />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="108" align="center" fixed="right">
           <template #default="{ $index }">
             <div class="row-ops">
-              <el-button type="primary" circle size="small" @click="addRow($index)">
+              <el-button type="primary" circle size="small" :disabled="locked" @click="addRow($index)">
                 <el-icon><Plus /></el-icon>
               </el-button>
-              <el-button type="danger" circle size="small" @click="removeRow($index)">
+              <el-button type="danger" circle size="small" :disabled="locked" @click="removeRow($index)">
                 <el-icon><Minus /></el-icon>
               </el-button>
             </div>
@@ -196,8 +245,8 @@
     </div>
 
     <template #footer>
-      <el-button @click="emit('update:modelValue', false)">取消</el-button>
-      <el-button type="primary" @click="onSave">保存</el-button>
+      <el-button @click="emit('update:modelValue', false)">{{ locked ? '关闭' : '取消' }}</el-button>
+      <el-button type="primary" :disabled="locked" @click="onSave">保存</el-button>
     </template>
   </el-dialog>
 </template>
@@ -210,7 +259,9 @@ const props = defineProps({
   modelValue: Boolean,
   servers: { type: Array, default: () => [] },
   logPath: { type: String, default: '' },
-  updateUrl: { type: String, default: '' }
+  updateUrl: { type: String, default: '' },
+  /** 一键发送 / 定时发码运行中：系统参数与设备表只读 */
+  locked: { type: Boolean, default: false }
 })
 
 const emit = defineEmits([
@@ -307,8 +358,16 @@ function createRow() {
   }
 }
 
+function warnLocked() {
+  ElMessage.warning('运行中不可改动系统参数或设备，请先停止一键发送/定时发码')
+}
+
 /** 在当前行下方插入；无 index 时追加到末尾 */
 function addRow(afterIndex) {
+  if (props.locked) {
+    warnLocked()
+    return
+  }
   const row = createRow()
   if (Number.isInteger(afterIndex) && afterIndex >= 0) {
     localServers.value.splice(afterIndex + 1, 0, row)
@@ -318,6 +377,10 @@ function addRow(afterIndex) {
 }
 
 function removeRow(index) {
+  if (props.locked) {
+    warnLocked()
+    return
+  }
   if (localServers.value.length <= 1) {
     ElMessage.warning('至少保留一条配置')
     return
@@ -326,11 +389,19 @@ function removeRow(index) {
 }
 
 async function pickPath() {
+  if (props.locked) {
+    warnLocked()
+    return
+  }
   const p = await window.api.selectLogPath()
   if (p) emit('update:logPath', p)
 }
 
 async function onCheckUpdate() {
+  if (props.locked) {
+    warnLocked()
+    return
+  }
   checking.value = true
   try {
     const res = await window.api.checkUpdate(props.updateUrl)
@@ -346,6 +417,10 @@ async function onCheckUpdate() {
 }
 
 async function onDownloadUpdate() {
+  if (props.locked) {
+    warnLocked()
+    return
+  }
   downloading.value = true
   try {
     const res = await window.api.downloadUpdate()
@@ -356,6 +431,10 @@ async function onDownloadUpdate() {
 }
 
 async function onInstallUpdate() {
+  if (props.locked) {
+    warnLocked()
+    return
+  }
   try {
     await ElMessageBox.confirm('将安装新版本并重启应用，是否继续？', '安装更新', {
       type: 'warning',
@@ -397,6 +476,10 @@ function onRollbackSelectVisible(open) {
 }
 
 async function onRollback() {
+  if (props.locked) {
+    warnLocked()
+    return
+  }
   const version = String(rollbackVersion.value || '').trim()
   if (!version) {
     ElMessage.warning('请先选择或输入要回退的版本')
@@ -426,6 +509,10 @@ async function onRollback() {
 }
 
 async function onSave() {
+  if (props.locked) {
+    warnLocked()
+    return
+  }
   const next = localServers.value.map((s) => ({ ...s }))
   // 设置里点保存时，先由主界面写入本地配置文件
   emit('update:servers', next)
@@ -491,6 +578,10 @@ async function onSave() {
 .dlg-close:active {
   transform: scale(0.96);
   background: rgba(214, 69, 69, 0.3);
+}
+
+.lock-alert {
+  margin-bottom: 12px;
 }
 
 .toolbar {

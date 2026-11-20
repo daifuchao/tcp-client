@@ -1,11 +1,11 @@
 {
   "name": "tcp-server-sim",
   "productName": "TCP服务端数据模拟",
-  "version": "1.0.6",
+  "version": "1.0.9",
   "description": "TCP 服务端数据模拟工具",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && node scripts/dev-electron.cjs\"",
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5174 && node scripts/dev-electron.cjs\"",
     "build": "vite build",
     "start": "electron .",
     "start:built": "npm run build && electron .",

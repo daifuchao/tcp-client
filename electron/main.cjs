@@ -3,9 +3,11 @@ const path = require('path')
 const fs = require('fs')
 const net = require('net')
 const os = require('os')
+const { spawn } = require('child_process')
 const {
   normalizeSeq,
   ensureUidHead,
+  resolveReaderLengths,
   generateCodes,
   generateBulkCodes
 } = require('./codegen.cjs')
@@ -118,7 +120,8 @@ function normalizeData(raw) {
         ? raw.updateUrl.trim()
         : DEFAULT_UPDATE_URL,
     servers: servers.map((s) => {
-      const codeLength = Math.max(5, Number(s.codeLength) || 20)
+      const codeLength = Math.max(1, Math.floor(Number(s.codeLength) || 20))
+      const { bodyLength } = resolveReaderLengths({ ...s, codeLength })
       return {
         id: String(s.id || `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`),
         enabled: !!s.enabled,
@@ -139,7 +142,7 @@ function normalizeData(raw) {
         cycleMs: Number(s.cycleMs) || 1000,
         planCount: Number(s.planCount) || 0,
         uidSeq: normalizeSeq(s.uidSeq == null ? 1 : s.uidSeq),
-        uidHead: ensureUidHead(s.uidHead, codeLength),
+        uidHead: ensureUidHead(s.uidHead, bodyLength),
         draftCode: typeof s.draftCode === 'string' ? s.draftCode : ''
       }
     })
@@ -239,9 +242,102 @@ function writeLog(logPath, enableLog, line) {
   writeLogSync(logPath, enableLog, line)
 }
 
+const CLIENT_RX_MAX_ENTRIES = 100
+
+/** 去掉空格、逗号、0x 等，得到连续十六进制字符 */
+function compactHexString(text) {
+  return String(text || '')
+    .replace(/0x/gi, '')
+    .replace(/[^0-9A-Fa-f]/g, '')
+}
+
+/** 判断报文是否为「十六进制文本」（如 4F4B、4F 4B、0x4F4B） */
+function payloadLooksLikeHexText(raw) {
+  const trimmed = String(raw || '').trim()
+  if (!trimmed) return false
+  if (!/^[0-9A-Fa-f\s\r\n\t,.:;-]+$/.test(trimmed)) return false
+  const compact = compactHexString(trimmed)
+  if (compact.length < 2 || compact.length % 2 !== 0) return false
+  const significant = trimmed.replace(/[\s,.:;-]/g, '')
+  return compact.length === significant.length
+}
+
+function bytesToHexDisplay(bytes) {
+  return bytes.toString('hex').toUpperCase().replace(/(..)/g, '$1 ').trim()
+}
+
+/** 是否适合在界面当「明文」展示（排除替换符、控制符、私用区等） */
+function isReadableDisplayText(text) {
+  if (text == null || text === '') return false
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)
+    if (cp === 0xfffd) return false
+    if (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) return false
+    if (cp >= 0xe000 && cp <= 0xf8ff) return false
+    if (cp >= 0xfff0 && cp <= 0xffff) return false
+  }
+  return true
+}
+
+function decodeBytesToDisplay(bytes) {
+  if (!bytes || !bytes.length) return ''
+  if (bytes.length === 1) {
+    const b = bytes[0]
+    if (b >= 0x20 && b <= 0x7e) return bytes.toString('ascii')
+    return bytesToHexDisplay(bytes)
+  }
+  const tryTextDecoder = (encoding) => {
+    try {
+      return new TextDecoder(encoding, { fatal: false }).decode(bytes)
+    } catch {
+      return ''
+    }
+  }
+  for (const enc of ['utf-8', 'gbk', 'gb2312']) {
+    const text = tryTextDecoder(enc)
+    if (isReadableDisplayText(text)) return text
+  }
+  const latin = bytes.toString('latin1')
+  if (isReadableDisplayText(latin) && /^[\x09\x0a\x0d\x20-\x7e]*$/.test(latin)) return latin
+  return bytesToHexDisplay(bytes)
+}
+
+/** 读值展示：十六进制文本 → 字节 → UTF-8/GBK；否则按原始字节解码 */
+function bufferToClientRxDisplay(buf) {
+  if (!buf || !buf.length) return ''
+  const raw = buf.toString('latin1').trimEnd()
+  if (payloadLooksLikeHexText(raw)) {
+    try {
+      return decodeBytesToDisplay(Buffer.from(compactHexString(raw.trim()), 'hex'))
+    } catch {
+      /* fall through */
+    }
+  }
+  return decodeBytesToDisplay(buf)
+}
+
+function appendClientRx(sess, chunk) {
+  const part = String(chunk ?? '')
+  if (!part) return String(sess.clientRx || '')
+  if (!Array.isArray(sess.clientRxEntries)) sess.clientRxEntries = []
+  sess.clientRxEntries.push(`${formatLogTime()}\n${part}`)
+  if (sess.clientRxEntries.length > CLIENT_RX_MAX_ENTRIES) {
+    sess.clientRxEntries = sess.clientRxEntries.slice(-CLIENT_RX_MAX_ENTRIES)
+  }
+  sess.clientRx = sess.clientRxEntries.join('\n')
+  return sess.clientRx
+}
+
 function getSession(id) {
   if (!sessions.has(id)) {
-    sessions.set(id, { server: null, sockets: new Set(), timer: null, sentCount: 0 })
+    sessions.set(id, {
+      server: null,
+      sockets: new Set(),
+      timer: null,
+      sentCount: 0,
+      clientRx: '',
+      clientRxEntries: []
+    })
   }
   return sessions.get(id)
 }
@@ -258,6 +354,8 @@ function stopServer(id) {
     } catch {}
   }
   sess.sockets.clear()
+  sess.clientRx = ''
+  sess.clientRxEntries = []
   if (sess.server) {
     try {
       sess.server.close()
@@ -278,7 +376,11 @@ function startServer(serverCfg, logPath) {
       writeLog(logPath, serverCfg.enableLog, `[${serverCfg.name}] 客户端接入 ${remote}`)
 
       socket.on('data', (buf) => {
-        writeLog(logPath, serverCfg.enableLog, `[${serverCfg.name}] 收到(${remote}): ${buf.toString('utf-8')}`)
+        const text = bufferToClientRxDisplay(buf)
+        const hexNote = text !== bytesToHexDisplay(buf) ? ` [raw ${bytesToHexDisplay(buf)}]` : ''
+        writeLog(logPath, serverCfg.enableLog, `[${serverCfg.name}] 收到(${remote}): ${text}${hexNote}`)
+        const full = appendClientRx(sess, text)
+        notifyClientRx({ id: serverCfg.id, clientRx: full, chunk: text, remote })
       })
 
       socket.on('error', (err) => {
@@ -324,6 +426,28 @@ function buildPayload(serverCfg) {
     getPackageRemain,
     takeFromPackage
   })
+}
+
+/** 界面触发生码/导出：以当前表单为准；流水号等仍可与磁盘合并 */
+function mergeServerCfgFromUi(serverCfg, latest) {
+  const disk = latest || {}
+  const ui = serverCfg || {}
+  return {
+    ...disk,
+    ...ui,
+    id: ui.id || disk.id,
+    uidSeq: disk.uidSeq ?? ui.uidSeq,
+    uidHead: disk.uidHead != null && disk.uidHead !== '' ? disk.uidHead : ui.uidHead,
+    type: ui.type || disk.type || '读码器',
+    prefix: ui.prefix != null ? ui.prefix : disk.prefix,
+    suffix: ui.suffix != null ? ui.suffix : disk.suffix,
+    codeLength: Math.max(1, Math.floor(Number(ui.codeLength ?? disk.codeLength) || 20)),
+    sendCount: Math.max(1, Math.floor(Number(ui.sendCount ?? disk.sendCount) || 1)),
+    generateCount: Math.max(1, Math.floor(Number(ui.generateCount ?? disk.generateCount) || 10)),
+    enableId: !!(ui.enableId ?? disk.enableId),
+    name: ui.name || disk.name || '读码器',
+    enableLog: ui.enableLog !== false && disk.enableLog !== false
+  }
 }
 
 function sanitizeFileToken(name) {
@@ -382,6 +506,13 @@ function notifyDraftUpdated(payload) {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue
     win.webContents.send('tcp:draftUpdated', payload)
+  }
+}
+
+function notifyClientRx(payload) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue
+    win.webContents.send('tcp:clientRx', payload)
   }
 }
 
@@ -491,6 +622,7 @@ function runTimedCycleTick(serverId, logPath) {
     uidHead: built.uidHead
   })
   const result = sendOnce(
+    { ...latest, uidSeq: built.uidSeq, uidHead: built.uidHead },
     data.logPath || logPath,
     built.text
   )
@@ -536,7 +668,6 @@ function sendOnce(serverCfg, logPath, customPayload) {
     payload = String(customPayload)
   } else {
     const built = buildPayload(serverCfg)
-    payload = built.text
     payload = built.text
   }
   // 去掉已有结尾换行后，统一以回车换行 \r\n 结束每条消息
@@ -592,6 +723,95 @@ function clampWindowPosition(win, x, y) {
 }
 
 const windowDragState = new WeakMap()
+/** 无边框窗在 Windows 上有时 isMaximized 与 unmaximize 不同步，用手动铺满 + 还原边界 */
+const winBoundsBeforeMaximize = new WeakMap()
+const winManualMaximized = new WeakMap()
+
+function isWinMaximized(win) {
+  if (!win || win.isDestroyed()) return false
+  return win.isMaximized() || winManualMaximized.get(win) === true
+}
+
+function getWindowChromeState(win) {
+  if (!win || win.isDestroyed()) return { maximized: false, fullscreen: false }
+  return { maximized: isWinMaximized(win), fullscreen: win.isFullScreen() }
+}
+
+function pushWindowChromeState(win) {
+  if (!win?.webContents || win.isDestroyed()) return
+  win.webContents.send('window:chrome-changed', getWindowChromeState(win))
+}
+
+function restoreWindowFromMaximize(win) {
+  if (!win || win.isDestroyed()) return
+  winManualMaximized.delete(win)
+  const saved = winBoundsBeforeMaximize.get(win)
+  winBoundsBeforeMaximize.delete(win)
+  if (win.isMaximized()) {
+    try {
+      win.unmaximize()
+    } catch {
+      /* unmaximize 无效时改用手动 setBounds */
+    }
+  }
+  if (saved) win.setBounds(saved)
+}
+
+function maximizeWindow(win) {
+  if (!win || win.isDestroyed()) return
+  winBoundsBeforeMaximize.set(win, win.getBounds())
+  win.maximize()
+  if (!win.isMaximized()) {
+    const { workArea } = screen.getDisplayMatching(win.getBounds())
+    win.setBounds(workArea)
+    winManualMaximized.set(win, true)
+  } else {
+    winManualMaximized.delete(win)
+  }
+}
+
+/** 与 GK Standard 一致：全屏时先退出全屏；已最大化则还原，否则最大化 */
+function toggleWindowMaximizeFromChrome(win) {
+  if (!win || win.isDestroyed()) return
+  if (win.isFullScreen()) win.setFullScreen(false)
+  else if (isWinMaximized(win)) restoreWindowFromMaximize(win)
+  else maximizeWindow(win)
+  pushWindowChromeState(win)
+}
+
+function toggleFullscreenForWindow(win) {
+  if (!win || win.isDestroyed()) return
+  win.setFullScreen(!win.isFullScreen())
+  pushWindowChromeState(win)
+}
+
+function toggleDevToolsForWindow(win) {
+  if (!win || win.isDestroyed()) return
+  const wc = win.webContents
+  if (wc.isDevToolsOpened()) wc.closeDevTools()
+  else wc.openDevTools({ mode: 'detach' })
+}
+
+/** 无边框：F11 全屏；开发态 F12 / Ctrl+Shift+I 开发者工具 */
+function attachWindowShortcuts(win) {
+  if (!win?.webContents) return
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    const key = String(input.key || '')
+    const isF11 = key === 'F11'
+    const isF12 = key === 'F12'
+    const isCtrlShiftI = Boolean(input.control && input.shift && !input.alt && key.toLowerCase() === 'i')
+    if (isF11) {
+      event.preventDefault()
+      toggleFullscreenForWindow(win)
+      return
+    }
+    if (!isDev) return
+    if (!isF12 && !isCtrlShiftI) return
+    event.preventDefault()
+    toggleDevToolsForWindow(win)
+  })
+}
 
 function createWindow() {
   const icon = getAppIcon()
@@ -602,6 +822,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#14181c',
     frame: false,
+    thickFrame: process.platform === 'win32',
     autoHideMenuBar: true,
     ...(icon && !icon.isEmpty() ? { icon } : {}),
     webPreferences: {
@@ -611,12 +832,21 @@ function createWindow() {
     }
   })
 
-  const pushMaximized = () => {
+  const pushChrome = () => {
     if (win.isDestroyed()) return
-    win.webContents.send('window:maximized-changed', { maximized: win.isMaximized() })
+    if (win.isMaximized()) winManualMaximized.delete(win)
+    pushWindowChromeState(win)
   }
-  win.on('maximize', pushMaximized)
-  win.on('unmaximize', pushMaximized)
+  win.on('maximize', pushChrome)
+  win.on('unmaximize', () => {
+    if (win.isDestroyed()) return
+    winManualMaximized.delete(win)
+    pushWindowChromeState(win)
+  })
+  win.on('enter-full-screen', pushChrome)
+  win.on('leave-full-screen', pushChrome)
+
+  attachWindowShortcuts(win)
 
   updater.setMainWindow(win)
   const data = loadData()
@@ -629,15 +859,15 @@ function createWindow() {
 /** 打包版走 dist；开发时 npm run dev 用 Vite，npm run start 优先本地 dist */
 function loadRenderer(win) {
   const distIndex = path.join(__dirname, '../dist/index.html')
-  const viteUrl = process.env.ELECTRON_DEV_URL || 'http://localhost:5173'
+  const viteUrl = process.env.ELECTRON_DEV_URL || 'http://localhost:5174'
   const useVite = isDev && process.env.ELECTRON_USE_VITE === '1'
 
   const tryVite = () => {
     win.loadURL(viteUrl)
     win.webContents.once('did-fail-load', (_e, code, _desc, url) => {
-      if (String(url || '').includes('5173') || code === -102) {
+      if (String(url || '').includes('5174') || code === -102) {
         console.error(
-          '[启动] 无法连接 Vite (5173)。请任选其一：\n' +
+          '[启动] 无法连接 Vite (5174)。请任选其一：\n' +
             '  · 开发热更新：npm run dev\n' +
             '  · 先构建再启动：npm run build && npm run start'
         )
@@ -697,24 +927,28 @@ ipcMain.handle('window:minimize', (event) => {
 
 ipcMain.handle('window:maximizeToggle', (event) => {
   const win = getWinFromEvent(event)
-  if (!win) return { ok: false, maximized: false }
-  if (win.isMaximized()) win.unmaximize()
-  else win.maximize()
-  return { ok: true, maximized: win.isMaximized() }
+  if (!win) return { ok: false, ...getWindowChromeState(null) }
+  toggleWindowMaximizeFromChrome(win)
+  return { ok: true, ...getWindowChromeState(win) }
 })
 
-ipcMain.handle('window:isMaximized', (event) => ({
-  maximized: !!getWinFromEvent(event)?.isMaximized()
-}))
+ipcMain.handle('window:isMaximized', (event) => getWindowChromeState(getWinFromEvent(event)))
 
 ipcMain.handle('window:close', (event) => {
   getWinFromEvent(event)?.close()
   return { ok: true }
 })
 
+ipcMain.handle('window:forceReload', (event) => {
+  const win = getWinFromEvent(event)
+  if (!win) return { ok: false }
+  win.webContents.reloadIgnoringCache()
+  return { ok: true }
+})
+
 ipcMain.on('window:drag-start', (event, point) => {
   const win = BrowserWindow.fromWebContents(event.sender)
-  if (!win || win.isMaximized()) return
+  if (!win || isWinMaximized(win) || win.isFullScreen()) return
   const [wx, wy] = win.getPosition()
   windowDragState.set(win, {
     startX: point.x,
@@ -797,6 +1031,54 @@ ipcMain.handle('update:rollback', async (_e, updateUrl, version) => {
 
 ipcMain.handle('data:configPath', () => getConfigPath())
 
+/**
+ * 打开 config.json。
+ * Windows 上 .json 常无「默认应用」，shell.openPath 会报错；.txt 多关联记事本故正常。
+ * 因此 Windows 固定用 notepad.exe 传路径打开，不走文件关联。
+ */
+function openConfigFile(filePath) {
+  const target = filePath || ensureDataFile()
+  if (!fs.existsSync(target)) {
+    return { ok: false, msg: '配置文件不存在' }
+  }
+
+  if (process.platform === 'win32') {
+    const notepad = path.join(process.env.WINDIR || 'C:\\Windows', 'System32', 'notepad.exe')
+    if (!fs.existsSync(notepad)) {
+      return { ok: false, msg: '未找到系统记事本' }
+    }
+    try {
+      const child = spawn(notepad, [target], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false
+      })
+      child.on('error', (err) => {
+        console.error('open config with notepad failed:', err)
+      })
+      child.unref()
+      return { ok: true, filePath: target, mode: 'notepad' }
+    } catch (err) {
+      try {
+        shell.showItemInFolder(target)
+      } catch {}
+      return {
+        ok: false,
+        msg: err?.message || '无法用记事本打开，请在资源管理器中右键 → 记事本'
+      }
+    }
+  }
+
+  const errMsg = shell.openPath(target)
+  if (errMsg) {
+    shell.showItemInFolder(target)
+    return { ok: false, msg: errMsg }
+  }
+  return { ok: true, filePath: target, mode: 'default' }
+}
+
+ipcMain.handle('data:openConfig', () => openConfigFile(ensureDataFile()))
+
 ipcMain.handle('net:getLocalIp', () => getLocalLanIp())
 
 ipcMain.handle('dialog:selectLogPath', async () => {
@@ -837,50 +1119,22 @@ ipcMain.handle('tcp:sendOnce', (_e, serverCfg, logPath, customPayload) =>
 
 ipcMain.handle('codes:exportFile', (_e, serverCfg, logPath) => {
   const data = loadData()
-  const latest = (data.servers || []).find((s) => s.id === serverCfg.id) || serverCfg
-  const latest = (data.servers || []).find((s) => s.id === serverCfg.id) || serverCfg
-  const merged = {
-    ...serverCfg,
-    ...latest,
-    id: serverCfg.id || latest.id,
-    type: latest.type || serverCfg.type || '读码器',
-    codeLength: Number(latest.codeLength ?? serverCfg.codeLength) || 20,
-    prefix: latest.prefix != null ? latest.prefix : serverCfg.prefix,
-    suffix: latest.suffix != null ? latest.suffix : serverCfg.suffix,
-    enableId: !!(latest.enableId ?? serverCfg.enableId),
-    generateCount: Math.max(1, Number(latest.generateCount ?? serverCfg.generateCount) || 10),
-    uidSeq: latest.uidSeq ?? serverCfg.uidSeq,
-    uidHead: latest.uidHead || serverCfg.uidHead,
-    name: latest.name || serverCfg.name || '读码器',
-    enableLog: latest.enableLog !== false
+  const latest = (data.servers || []).find((s) => s.id === serverCfg.id)
+  const merged = mergeServerCfgFromUi(serverCfg, latest)
   return exportCodesToFile(merged, logPath || data.logPath)
 })
 
 ipcMain.handle('tcp:buildPayload', (_e, serverCfg) => {
   const data = loadData()
-  const latest = (data.servers || []).find((s) => s.id === serverCfg.id) || serverCfg
-  // 码长度/前缀/类型/启用ID/单次个数等以本地配置为准
-  // 码长度/前缀/类型/启用ID/单次个数等以本地配置为准
-  const merged = {
-    ...serverCfg,
-    ...latest,
-    id: serverCfg.id || latest.id,
-    type: latest.type || serverCfg.type || '读码器',
-    codeLength: Number(latest.codeLength ?? serverCfg.codeLength) || 20,
-    prefix: latest.prefix != null ? latest.prefix : serverCfg.prefix,
-    suffix: latest.suffix != null ? latest.suffix : serverCfg.suffix,
-    enableId: !!(latest.enableId ?? serverCfg.enableId),
-    sendCount: Number(latest.sendCount ?? serverCfg.sendCount) || 1,
-    uidSeq: latest.uidSeq ?? serverCfg.uidSeq,
-    uidHead: latest.uidHead || serverCfg.uidHead
-  }
+  const latest = (data.servers || []).find((s) => s.id === serverCfg.id)
+  const merged = mergeServerCfgFromUi(serverCfg, latest)
   const result = buildPayload(merged)
   persistServerUidState(merged.id, { uidSeq: result.uidSeq, uidHead: result.uidHead })
+  return result
 })
 
 ipcMain.handle('tcp:startCycle', (_e, serverCfg, logPath) => {
   const sess = getSession(serverCfg.id)
-  if (sess.timer) clearInterval(sess.timer)
   if (sess.timer) clearInterval(sess.timer)
   const cycle = Math.max(100, Number(serverCfg.cycleMs) || 1000)
   runTimedCycleTick(serverCfg.id, logPath)
@@ -890,6 +1144,7 @@ ipcMain.handle('tcp:startCycle', (_e, serverCfg, logPath) => {
 
 ipcMain.handle('tcp:stopCycle', (_e, id) => {
   const sess = getSession(id)
+  if (sess.timer) {
     clearInterval(sess.timer)
     sess.timer = null
   }
@@ -959,7 +1214,6 @@ function plcStaggerDelayMs(frameMs, plcCount, index) {
 
 function batchSendDevice(serverCfg, logPath) {
   if (!batchState.running || isDevicePlanDone(serverCfg)) return
-  if (!batchState.running || isDevicePlanDone(serverCfg)) return
   const built = buildPayload(serverCfg)
   const draftCode = String(built.text || '').replace(/(?:\r\n|\n|\r)+$/g, '')
   persistServerUidState(serverCfg.id, {
@@ -974,6 +1228,7 @@ function batchSendDevice(serverCfg, logPath) {
     uidHead: built.uidHead
   })
   const result = sendOnce(
+    { ...serverCfg, uidSeq: built.uidSeq, uidHead: built.uidHead },
     logPath,
     built.text
   )
@@ -1169,6 +1424,16 @@ ipcMain.handle('tcp:batchStatus', () => ({
   running: batchState.running
 }))
 
+ipcMain.handle('tcp:clearClientRx', (_e, id) => {
+  if (id) {
+    const sess = getSession(id)
+    sess.clientRx = ''
+    sess.clientRxEntries = []
+    notifyClientRx({ id, clientRx: '' })
+  }
+  return { ok: true }
+})
+
 ipcMain.handle('tcp:clearCount', (_e, id) => {
   if (id) {
     getSession(id).sentCount = 0
@@ -1185,7 +1450,8 @@ ipcMain.handle('tcp:getStats', () => {
       sentCount: sess.sentCount,
       listening: !!sess.server,
       peers: sess.sockets.size,
-      packageRemain: getPackageRemain(id)
+      packageRemain: getPackageRemain(id),
+      clientRx: String(sess.clientRx || '')
     }
   }
   for (const id of codePackages.keys()) {
@@ -1194,7 +1460,8 @@ ipcMain.handle('tcp:getStats', () => {
         sentCount: 0,
         listening: false,
         peers: 0,
-        packageRemain: getPackageRemain(id)
+        packageRemain: getPackageRemain(id),
+        clientRx: ''
       }
     } else {
       map[id].packageRemain = getPackageRemain(id)

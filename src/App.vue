@@ -18,6 +18,10 @@
             {{ batchRunning ? '停止发送' : '一键发送' }}
           </el-button>
           <el-button type="primary" plain @click="onClearCounts">清空发码计数</el-button>
+          <el-button type="primary" plain @click="onForceReload">
+            <el-icon class="btn-icon"><Refresh /></el-icon>
+            强制刷新
+          </el-button>
           <el-button type="primary" @click="settingsVisible = true">
             <el-icon class="btn-icon"><Setting /></el-icon>
             设置
@@ -29,10 +33,10 @@
               <el-icon :size="14"><Minus /></el-icon>
             </button>
           </el-tooltip>
-          <el-tooltip :content="winMaximized ? '还原窗口' : '最大化'" placement="bottom" :show-after="300">
+          <el-tooltip :content="winChromeTip" placement="bottom" :show-after="300">
             <button type="button" class="win-ctrl" @click="onWinMaximizeToggle">
               <el-icon :size="13">
-                <CopyDocument v-if="winMaximized" />
+                <CopyDocument v-if="winZoomed" />
                 <FullScreen v-else />
               </el-icon>
             </button>
@@ -76,7 +80,7 @@
               <el-button
                 type="primary"
                 :plain="!row.timedSend"
-                :disabled="batchRunning || row.enableBatch"
+                :disabled="batchRunning && row.enableBatch"
                 @click="onToggleTimed(row)"
               >
                 {{ row.timedSend ? '停止定时发码' : '定时发送码' }}
@@ -91,15 +95,37 @@
             </div>
           </div>
 
-          <el-input
-            v-model="row.draftCode"
-            type="textarea"
-            :rows="4"
-            resize="vertical"
-            class="code-box"
-            placeholder="请输入发送内容（多码用英文逗号隔开，发送时自动加回车换行）"
-            @change="persist"
-          />
+          <div class="code-split">
+            <div class="code-pane">
+              <div class="code-pane-head">
+                <span class="code-pane-label">发送</span>
+              </div>
+              <el-input
+                v-model="row.draftCode"
+                type="textarea"
+                :rows="4"
+                resize="vertical"
+                class="code-box code-box--send"
+                placeholder="待发内容（多码英文逗号分隔，发送自动加换行）"
+                @change="persist"
+              />
+            </div>
+            <div class="code-pane">
+              <div class="code-pane-head">
+                <span class="code-pane-label">客户端读值</span>
+                <el-button type="primary" link size="small" @click="onClearClientRx(row)">清空</el-button>
+              </div>
+              <el-input
+                :model-value="clientRxMap[row.id] || ''"
+                type="textarea"
+                :rows="4"
+                resize="vertical"
+                readonly
+                class="code-box code-box--rx"
+                placeholder="十六进制文本→UTF-8；不可见/单字节二进制以 Hex 显示"
+              />
+            </div>
+          </div>
 
           <div class="device-foot">
             <el-button type="primary" @click="onGenerate(row)">生成码</el-button>
@@ -132,12 +158,43 @@
           <el-icon><FolderOpened /></el-icon>
           <span>日志路径</span>
         </div>
-        <el-input v-model="logPath" class="log-path" placeholder="请选择或输入日志目录" @change="persist" />
-        <el-button type="primary" @click="chooseLogPath">选择路径</el-button>
-        <el-button type="primary" plain @click="persist(true)">保存配置</el-button>
+        <el-input
+          v-model="logPath"
+          class="log-path"
+          placeholder="请选择或输入日志目录"
+          :disabled="settingsLocked"
+          @change="persist"
+        />
+        <el-button type="primary" :disabled="settingsLocked" @click="chooseLogPath">选择路径</el-button>
+        <el-button type="primary" plain :disabled="settingsLocked" @click="onPersistConfig">保存配置</el-button>
         <el-button type="primary" plain @click="onOpenTodayLog">打开今日日志</el-button>
         <el-button type="primary" plain @click="onOpenLogDir">打开日志目录</el-button>
-        <span class="hint" :title="configPath">日志：{{ todayName }} · 配置保存在 AppData（升级 .exe 不丢失）</span>
+        <el-button
+          type="primary"
+          plain
+          :title="configPath ? configPath : 'config.json'"
+          @click="onOpenConfig"
+        >
+          打开配置
+        </el-button>
+        <span class="log-bar-grow" aria-hidden="true" />
+        <span class="hint">
+          日志：{{ todayName }} ·
+          <span
+            class="hint-config-link"
+            role="button"
+            tabindex="0"
+            :title="
+              configPath
+                ? `点击用记事本打开（.json 不走系统默认程序）：${configPath}`
+                : '点击用记事本打开 config.json'
+            "
+            @click.stop="onOpenConfig"
+            @keydown.enter.prevent="onOpenConfig"
+          >
+            配置保存在 AppData（升级 .exe 不丢失）
+          </span>
+        </span>
       </div>
     </main>
 
@@ -146,6 +203,7 @@
       :servers="servers"
       :log-path="logPath"
       :update-url="updateUrl"
+      :locked="settingsLocked"
       @update:servers="onServersUpdate"
       @update:log-path="onLogPathUpdate"
       @update:update-url="onUpdateUrlUpdate"
@@ -165,27 +223,57 @@ const logPath = ref('')
 const updateUrl = ref('')
 const configPath = ref('')
 const statsMap = reactive({})
+const clientRxMap = reactive({})
 const batchRunning = ref(false)
+/** 一键发送或定时发码运行中：系统参数 / 设备管理只读，禁止改动删除 */
+const settingsLocked = computed(
+  () => batchRunning.value || servers.value.some((s) => !!s.timedSend)
+)
 const winMaximized = ref(false)
+const winFullscreen = ref(false)
+const winZoomed = computed(() => winMaximized.value || winFullscreen.value)
+const winChromeTip = computed(() => (winZoomed.value ? '还原' : '最大化'))
 const appVersion = __APP_VERSION__
 const appBuildTime = __APP_BUILD_TIME__
 let pollTimer = null
 
-async function refreshWinMaximized() {
+function applyWinChromeState(payload) {
+  if (typeof payload?.maximized === 'boolean') winMaximized.value = payload.maximized
+  if (typeof payload?.fullscreen === 'boolean') winFullscreen.value = payload.fullscreen
+}
+
+async function refreshWinChrome() {
   if (typeof window.api?.windowIsMaximized !== 'function') return
   const res = await window.api.windowIsMaximized()
-  winMaximized.value = !!res?.maximized
+  applyWinChromeState(res || {})
 }
 
 function onWinMinimize() {
   window.api?.windowMinimize?.()
 }
 
+async function onForceReload() {
+  try {
+    await ElMessageBox.confirm(
+      '将从 AppData 重新加载配置并刷新界面，当前未保存的修改会丢失。',
+      '强制刷新',
+      { type: 'warning', confirmButtonText: '刷新', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  if (typeof window.api?.forceReload === 'function') {
+    await window.api.forceReload()
+  } else {
+    window.location.reload()
+  }
+}
+
 async function onWinMaximizeToggle() {
   if (typeof window.api?.windowMaximizeToggle !== 'function') return
   const res = await window.api.windowMaximizeToggle()
-  if (res && typeof res.maximized === 'boolean') winMaximized.value = res.maximized
-  else await refreshWinMaximized()
+  if (res) applyWinChromeState(res)
+  else await refreshWinChrome()
 }
 
 /** 标题栏双击：最大化 / 还原（与右侧按钮一致） */
@@ -361,6 +449,9 @@ async function refreshStats() {
     }, {}))
   Object.keys(statsMap).forEach((k) => delete statsMap[k])
   Object.assign(statsMap, map || {})
+  for (const [id, st] of Object.entries(map || {})) {
+    if (st && typeof st.clientRx === 'string') clientRxMap[id] = st.clientRx
+  }
 
   const status = await safeInvoke(() => window.api.batchStatus?.(), null)
   if (status && typeof status.running === 'boolean') {
@@ -427,7 +518,23 @@ async function onSettingsSaved(payload) {
   await refreshStats()
 }
 
+function warnSettingsLocked() {
+  ElMessage.warning('运行中不可改动系统参数或设备，请先停止一键发送/定时发码')
+}
+
+async function onPersistConfig() {
+  if (settingsLocked.value) {
+    warnSettingsLocked()
+    return
+  }
+  await persist(true)
+}
+
 async function chooseLogPath() {
+  if (settingsLocked.value) {
+    warnSettingsLocked()
+    return
+  }
   const p = await window.api.selectLogPath()
   if (p) {
     logPath.value = p
@@ -465,13 +572,33 @@ async function onOpenLogDir() {
   if (!res?.ok) ElMessage.warning(res?.msg || '无法打开日志目录')
 }
 
-async function onToggleTimed(row) {
-  if (batchRunning.value) {
-    ElMessage.info('一键发送运行中，请先停止后再操作定时发码')
-    return
+async function onOpenConfig() {
+  try {
+    if (typeof window.api.openConfigFile !== 'function') {
+      ElMessage.warning('请重启应用后使用（preload 已更新）')
+      return
+    }
+    const res = await window.api.openConfigFile()
+    if (!res?.ok) {
+      ElMessage.warning(res?.msg || '无法打开配置文件')
+      return
+    }
+    ElMessage.success({
+      message:
+        res.mode === 'notepad'
+          ? `已用记事本打开：${res.filePath || configPath.value || 'config.json'}`
+          : `已打开：${res.filePath || configPath.value || 'config.json'}`,
+      duration: 5000,
+      showClose: true
+    })
+  } catch (err) {
+    ElMessage.error(err?.message || String(err))
   }
-  if (row.enableBatch) {
-    ElMessage.info('该设备已勾选「一键发码」，请使用顶部「一键发送」')
+}
+
+async function onToggleTimed(row) {
+  if (batchRunning.value && row.enableBatch) {
+    ElMessage.info('该设备正在参与一键发送，请先停止一键发送后再开定时发码')
     return
   }
   if (!row.enabled) {
@@ -577,9 +704,10 @@ async function onSendAll() {
   if (batchRunning.value) {
     await window.api.stopBatch()
     batchRunning.value = false
-    // 同步关闭界面上的定时发码标记
     for (const row of servers.value) {
-      if (row.timedSend) row.timedSend = false
+      if (!row.enableBatch || !row.timedSend) continue
+      await window.api.stopCycle(row.id)
+      row.timedSend = false
     }
     await persist()
     ElMessage.info('已停止一键发送')
@@ -613,12 +741,24 @@ async function onClearOne(row) {
   await refreshStats()
 }
 
+async function onClearClientRx(row) {
+  if (!row?.id) return
+  await safeInvoke(() => window.api.clearClientRx?.(row.id), null)
+  clientRxMap[row.id] = ''
+}
+
+function applyClientRx(payload) {
+  if (!payload?.id) return
+  if (payload.clientRx != null) clientRxMap[payload.id] = String(payload.clientRx)
+}
+
 async function onClearCounts() {
   await window.api.clearCount()
   await refreshStats()
   ElMessage.success('发码计数已清空')
 }
 
+let unsubClientRx = null
 let unsubDraftUpdated = null
 let unsubSendFinished = null
 let unsubWinMaximized = null
@@ -626,8 +766,11 @@ let unsubWinMaximized = null
 onMounted(async () => {
   document.documentElement.classList.add('dark')
   await load()
-  await refreshWinMaximized()
+  await refreshWinChrome()
   pollTimer = setInterval(refreshStats, 1000)
+  if (window.api.onClientRx) {
+    unsubClientRx = window.api.onClientRx((payload) => applyClientRx(payload))
+  }
   if (window.api.onDraftUpdated) {
     unsubDraftUpdated = window.api.onDraftUpdated((payload) => applyDraftUpdated(payload))
   }
@@ -635,14 +778,13 @@ onMounted(async () => {
     unsubSendFinished = window.api.onSendFinished((payload) => onSendFinished(payload))
   }
   if (window.api.onWindowMaximizedChanged) {
-    unsubWinMaximized = window.api.onWindowMaximizedChanged((p) => {
-      if (typeof p?.maximized === 'boolean') winMaximized.value = p.maximized
-    })
+    unsubWinMaximized = window.api.onWindowMaximizedChanged((p) => applyWinChromeState(p))
   }
 })
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  if (typeof unsubClientRx === 'function') unsubClientRx()
   if (typeof unsubDraftUpdated === 'function') unsubDraftUpdated()
   if (typeof unsubSendFinished === 'function') unsubSendFinished()
   if (typeof unsubWinMaximized === 'function') unsubWinMaximized()
@@ -879,7 +1021,7 @@ onUnmounted(() => {
 
 .device-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
@@ -891,8 +1033,16 @@ onUnmounted(() => {
   flex-wrap: wrap;
   gap: 10px 18px;
   align-items: center;
+  min-height: 32px;
   color: #d5dee8;
   font-size: 13px;
+}
+
+.meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.2;
 }
 
 .meta-item b {
@@ -911,13 +1061,56 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
+.code-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.code-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.code-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.code-pane-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
 .code-box :deep(.el-textarea__inner) {
-  background: #f7f8fa !important;
-  color: #222 !important;
   border-radius: 6px;
   min-height: 96px;
   font-family: Consolas, 'Courier New', monospace;
   box-shadow: none !important;
+}
+
+.code-box--send :deep(.el-textarea__inner) {
+  background: #f7f8fa !important;
+  color: #222 !important;
+}
+
+.code-box--rx :deep(.el-textarea__inner) {
+  background: #eef6f6 !important;
+  color: #1a3d3d !important;
+  cursor: default;
+}
+
+@media (max-width: 900px) {
+  .code-split {
+    grid-template-columns: 1fr;
+  }
 }
 
 .device-foot {
@@ -942,7 +1135,7 @@ onUnmounted(() => {
 .log-bar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 12px;
   min-width: 0;
   max-width: 100%;
@@ -963,18 +1156,46 @@ onUnmounted(() => {
 }
 
 .log-path {
-  flex: 1 1 180px;
+  flex: 0 1 auto;
+  width: min(320px, 42vw);
+  min-width: 120px;
+  max-width: 38%;
+}
+
+.log-bar-grow {
+  flex: 1 1 8px;
   min-width: 0;
-  max-width: 100%;
 }
 
 .hint {
+  flex: 0 0 auto;
+  margin-left: auto;
+  text-align: right;
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
   min-width: 0;
-  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.hint-config-link {
+  position: relative;
+  z-index: 2;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0 2px;
+  text-decoration: underline dotted color-mix(in srgb, var(--muted) 55%, transparent);
+  text-underline-offset: 3px;
+  transition:
+    color 0.18s ease,
+    text-decoration-color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.hint-config-link:hover {
+  color: var(--el-color-primary);
+  text-decoration-color: var(--el-color-primary);
+  background-color: color-mix(in srgb, var(--el-color-primary) 14%, transparent);
 }
 </style>

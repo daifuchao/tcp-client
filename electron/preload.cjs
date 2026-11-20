@@ -10,9 +10,11 @@ contextBridge.exposeInMainWorld('api', {
   windowMaximizeToggle: () => ipcRenderer.invoke('window:maximizeToggle'),
   windowIsMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   windowClose: () => ipcRenderer.invoke('window:close'),
+  forceReload: () => ipcRenderer.invoke('window:forceReload'),
   loadData: () => ipcRenderer.invoke('data:load'),
   saveData: (data) => ipcRenderer.invoke('data:save', plain(data)),
   getConfigPath: () => ipcRenderer.invoke('data:configPath'),
+  openConfigFile: () => ipcRenderer.invoke('data:openConfig'),
   getLocalIp: () => ipcRenderer.invoke('net:getLocalIp'),
   selectLogPath: () => ipcRenderer.invoke('dialog:selectLogPath'),
   selectCodeFile: () => ipcRenderer.invoke('dialog:selectCodeFile'),
@@ -29,6 +31,7 @@ contextBridge.exposeInMainWorld('api', {
   stopBatch: () => ipcRenderer.invoke('tcp:stopBatch'),
   batchStatus: () => ipcRenderer.invoke('tcp:batchStatus'),
   clearCount: (id) => ipcRenderer.invoke('tcp:clearCount', id),
+  clearClientRx: (id) => ipcRenderer.invoke('tcp:clearClientRx', id),
   getStats: () => ipcRenderer.invoke('tcp:getStats'),
   importPackage: (serverId, content) => ipcRenderer.invoke('package:import', serverId, plain(content)),
   packageRemain: (serverId) => ipcRenderer.invoke('package:remain', serverId),
@@ -49,6 +52,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('update:status', listener)
     return () => ipcRenderer.removeListener('update:status', listener)
   },
+  onClientRx: (handler) => {
+    const listener = (_event, payload) => handler(payload)
+    ipcRenderer.on('tcp:clientRx', listener)
+    return () => ipcRenderer.removeListener('tcp:clientRx', listener)
+  },
   onDraftUpdated: (handler) => {
     const listener = (_event, payload) => handler(payload)
     ipcRenderer.on('tcp:draftUpdated', listener)
@@ -61,8 +69,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   onWindowMaximizedChanged: (handler) => {
     const listener = (_event, payload) => handler(payload)
-    ipcRenderer.on('window:maximized-changed', listener)
-    return () => ipcRenderer.removeListener('window:maximized-changed', listener)
+    ipcRenderer.on('window:chrome-changed', listener)
+    return () => ipcRenderer.removeListener('window:chrome-changed', listener)
   }
 })
 

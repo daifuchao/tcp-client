@@ -10,8 +10,9 @@
 | --- | --- |
 | 升级安装不丢配置 | 配置与 `.exe` / 安装目录分离，固定写在系统 **AppData** |
 | 单一数据源 | 一台机器一份 `config.json`，包含全局项 + 全部设备 |
-| 读写职责清晰 | **渲染进程**负责整表保存；**主进程**在发码/导码等运行时对部分字段做增量写盘 |
+| 双通道写盘 | **界面** `saveData` 整表保存；**主进程** `persistServerUidState` 发码时增量写单设备字段 |
 | 运行时状态与配置分离 | TCP 连接、发码计数、码包队列、一键发码调度等 **不写入** `config.json` |
+| 发码调度与配置项关系 | `enableBatch` 只影响顶栏「一键发送」；**定时发码**按设备单独开关，互不禁止 |
 
 ---
 
@@ -46,6 +47,23 @@ function getConfigPath() {
 | 运行日志、生码导出 `.txt` | `config.json` 里的 `logPath`（默认 `文档/tcp-server-logs`，用户可改） |
 
 日志按日追加：`{logPath}/{年}-{月}-{日}.txt`。
+
+### 2.3 在界面中查看 / 打开 `config.json`
+
+| 入口 | 行为 |
+| --- | --- |
+| 底栏 **「打开配置」** 按钮 | IPC `data:openConfig` |
+| 底栏 **「配置保存在 AppData…」** 链接 | 同上 |
+| 悬停提示 | 显示 `configPath` 绝对路径（来自 `loadData().configPath`） |
+
+Windows 上 **`.json` 常无系统默认打开方式**，不能像 `.txt` 一样用 `shell.openPath` 双击打开。因此 `openConfigFile()` **固定调用 `notepad.exe` + 文件路径**，不依赖文件关联。
+
+| 对比 | 说明 |
+| --- | --- |
+| 今日日志 `.txt` | `log:openToday` 使用 `shell.openPath`，系统多已关联记事本 |
+| `config.json` | `data:openConfig` 使用记事本进程打开，避免「没有与之关联的应用」 |
+
+实现：`electron/main.cjs` 中 `openConfigFile()`；`preload` 暴露 `window.api.openConfigFile()`。
 
 ---
 
@@ -99,18 +117,18 @@ function getConfigPath() {
 | --- | --- |
 | `id` | 稳定主键，TCP 会话、码包 Map 均按此关联 |
 | `enabled` | 是否开启 TCP 监听（与「设置-开启」一致） |
-| `enableBatch` | 是否参与顶部「一键发送」 |
-| `timedSend` | 是否定时发码（会写入配置；启动应用时会清掉，不自动恢复发码） |
+| `enableBatch` | 是否参与顶栏 **「一键发送」**（与单机 **定时发码** 可同时勾选） |
+| `timedSend` | 是否处于「定时发送码」状态（会写入；**启动应用时界面会全部清 false 并写回**，不自动续跑） |
 | `enableId` / `enableImport` / `enableLog` | 启用 ID、导入码包 UI、写日志 |
 | `type` | `PLC` 或 `读码器` |
 | `name` / `ip` / `port` | 显示名与监听地址 |
-| `prefix` / `suffix` | 码前缀、ID 前后缀 |
-| `codeLength` / `sendCount` / `generateCount` | 码长度、单次个数、生码导出条数 |
+| `prefix` / `suffix` | 码前缀；后缀（拼在码体与 `:01` 等 ID 之间） |
+| `codeLength` / `sendCount` / `generateCount` | 码长度（**按前缀自动**：URL 类为码体位数；短前缀如 `OK` 为整条码上限）、单次个数、生码导出条数 |
 | `cycleMs` / `planCount` | 发码周期、计划发码数（0=不限） |
-| `uidSeq` / `uidHead` | 流水号与固定前段（发码后递增并可能写回） |
+| `uidSeq` / `uidHead` | 流水号（尾段自增）；`uidHead` 历史字段，长码现改为每条随机前段 |
 | `draftCode` | 界面文本框中的待发内容 |
 
-缺省值、类型矫正（如 `codeLength` 最小 5、`uidHead` 长度补齐）均在 `normalizeData()` / `codegen.cjs` 中完成。
+缺省值、类型矫正（如 `codeLength` 最小 1）均在 `normalizeData()` / `codegen.cjs` 中完成。生码规则见 `codegen.cjs` 文件头注释。
 
 ---
 
@@ -148,7 +166,7 @@ function getConfigPath() {
 
 ### 4.4 `persistServerUidState(serverId, patch)`（主进程增量写）
 
-仅更新 **单台** 设备的字段，用于发码流程中不经过界面的写回：
+仅更新 **单台** 设备的字段，用于发码流程中不经过界面 `persist()` 的写回：
 
 | patch 字段 | 写回内容 |
 | --- | --- |
@@ -163,10 +181,14 @@ function getConfigPath() {
 | 场景 | 通常写入 |
 | --- | --- |
 | `tcp:buildPayload`（界面「生成码」） | `uidSeq`、`uidHead` |
-| 定时发码 tick | `uidSeq`、`uidHead`、`draftCode` |
-| 一键发码每次发送 | 同上 |
+| 定时发码 tick `runTimedCycleTick` | `uidSeq`、`uidHead`、`draftCode` |
+| 一键发码 `batchSendDevice` | 同上 |
 | 生码导出 `exportCodesToFile` | `uidSeq`、`uidHead` |
-| 定时达计划停止 | `persistTimedSendOff` → 仅 `timedSend: false` |
+| 定时达计划 `stopTimedCycleForPlan` | `persistTimedSendOff` → 磁盘 `timedSend: false` |
+
+### 4.5 `openConfigFile(filePath)`
+
+Windows：`spawn(notepad.exe, [filePath])`。非 Windows：尝试 `shell.openPath`，失败则 `showItemInFolder`。
 
 ---
 
@@ -179,6 +201,7 @@ function getConfigPath() {
 | `loadData()` | `data:load` | 读完整配置 + `configPath` |
 | `saveData(data)` | `data:save` | 整表保存；并 `updater.applyFeedUrl(updateUrl)` |
 | `getConfigPath()` | `data:configPath` | 仅返回 `config.json` 绝对路径 |
+| `openConfigFile()` | `data:openConfig` | 用记事本（Windows）等方式打开配置 |
 
 其他 TCP/发码 IPC **不直接替代** `saveData`，但可能触发 `persistServerUidState` 或 `loadData()` 读最新设备参数。
 
@@ -208,23 +231,26 @@ app.whenReady()
   → 加载 Vue 界面
 
 界面 onMounted → load()
-  → window.api.loadData()     // 再次读盘，填充 servers / logPath / updateUrl
-  → 仅恢复 TCP 监听（enabled），不自动恢复定时/一键发码
-  → persist()                 // 把启动时的修正（如 timedSend 清零）写回
+  → window.api.loadData()     // 填充 servers / logPath / updateUrl / configPath
+  → 各设备 timedSend 置 false // 不自动恢复定时发码
+  → applyServerRuntime        // 仅恢复 enabled 的 TCP 监听
+  → persist()                 // 把 timedSend 清零等写回磁盘
 ```
 
 主窗口创建时读一次配置是为了 **更新源**；界面 `load()` 再读一次是为了 **展示与运行态对齐**。
+
+**一键发码**不会随启动自动运行，需点顶栏「一键发送」。
 
 ### 6.2 运行中「读盘」的典型时机
 
 | 时机 | 目的 |
 | --- | --- |
-| `tcp:buildPayload` / `codes:exportFile` | 用磁盘上该设备的 `prefix`、`sendCount`、`enableId` 等与界面传入合并 |
-| `runTimedCycleTick` | 定时发码用最新 `timedSend`、`planCount` 等 |
-| `getBatchServers()` | 一键发码用最新 `enabled` + `enableBatch` |
+| `tcp:buildPayload` / `codes:exportFile` | 合并磁盘 `latest` 与界面传入的 `serverCfg` |
+| `runTimedCycleTick` | 读 `enabled`、`timedSend`、`planCount` 等 |
+| `getBatchServers()` | 读 `enabled` + `enableBatch` |
 | `checkUpdate` / `rollback`（URL 变更） | 读写 `updateUrl` |
 
-即：**关键发码逻辑以磁盘为准**，避免界面未保存时与后台不一致；合并规则为 `serverCfg` 与 `latest` 字段级覆盖（见 `tcp:buildPayload` 内 `merged`）。
+合并规则：IPC 处理器内将 `serverCfg` 与 `loadData()` 得到的 `latest` 字段合并（见 `tcp:buildPayload`、`codes:exportFile` 中的 `merged` 对象）。
 
 ---
 
@@ -236,21 +262,20 @@ app.whenReady()
 
 | 触发 | 说明 |
 | --- | --- |
-| 应用 `load()` 结束 | 启动修正写回 |
+| 应用 `load()` 结束 | 写回启动时 `timedSend` 清零等 |
 | 设置弹窗保存 | `onSettingsSaved` → `persist(true)` 并提示 |
-| 主界面「保存配置」按钮 | `persist(true)` |
-| 修改 `logPath`（change） | 自动保存 |
-| 设备 `draftCode` / `enableLog` change | 自动保存 |
-| 切换定时发码 | `timedSend` 变更后保存 |
-| 「生成码」 | 更新 `draftCode`、`uidSeq`、`uidHead` 后保存 |
-| 生码导出成功 | 写回 `uidSeq`、`uidHead` |
-| 一键发送开始/停止 | 清除各设备 `timedSend` 等后保存 |
+| 主界面 **「保存配置」** | `persist(true)` |
+| `logPath` / `draftCode` / `enableLog` 变更 | `@change` → `persist()` |
+| 切换 **定时发码** | `timedSend` 变更后 `persist()` |
+| **生成码** | 更新界面字段后 `persist()`（主进程也会写 `uidSeq`/`uidHead`） |
+| **生码导出**成功 | `persist()` + 主进程写 `uidSeq`/`uidHead` |
+| **一键发送** 开始/停止 | 清除参与设备 `timedSend` 等后 `persist()` |
 
-设置弹窗本身 **不直接** `saveData`：点「保存」通过 `emit('saved')` 交给 `App.vue` 统一 `persist(true)`。
+设置弹窗 **不直接** `saveData`：点「保存」通过 `emit('saved')` 交给 `App.vue` 的 `persist(true)`。
 
 ### 7.2 主进程增量保存
 
-见 §4.4；与界面 `persist()` **可能交错**（例如定时发码写 `draftCode` 的同时用户改设置）。后写入者优先；重要业务字段以 **最后一次 `saveData`** 为准。
+见 §4.4；与界面 `persist()` **可能交错**（例如定时发码写 `draftCode` 的同时用户在改设置）。以 **最后一次 `saveData`** 为准。
 
 ### 7.3 **不会** 写入 `config.json` 的内容
 
@@ -283,6 +308,7 @@ flowchart TB
     LOAD["loadData()"]
     SAVE["saveData()"]
     PATCH["persistServerUidState()"]
+    OPEN["openConfigFile → notepad"]
     RUN["TCP / 定时发码 / 一键发码"]
   end
 
@@ -296,6 +322,8 @@ flowchart TB
   PATCH --> SAVE
   RUN --> LOG
   UI --> LOAD
+  UI --> OPEN
+  OPEN --> CFG
 ```
 
 ---
@@ -308,7 +336,7 @@ flowchart TB
    - 修改 `ip`、日志路径等适应新环境。
    - **码包需重新导入**。
    - **已发条数** 从 0 开始。
-   - `timedSend` / 一键发码不会在中途状态恢复，需手动再开。
+   - 启动后 **不会自动定时/一键发码**，需手动再开。
 
 仅同步部分设备：编辑 JSON 中 `servers` 数组，合并时注意 `id` 不重复。
 
@@ -320,9 +348,9 @@ flowchart TB
 | --- | --- | --- |
 | 配置路径 | 同上 AppData（非项目目录） | 同上 |
 | 首次无文件 | 可迁移 `data/config.json` | 仅默认或旧 userData 迁移 |
-| 界面加载 | Vite HMR；主进程改 `main.cjs` 需重启 Electron | 加载 `dist/index.html` |
+| 界面加载 | Vite HMR；主进程改 `main.cjs` / `preload` 需重启 Electron | 加载 `dist/index.html` |
 
-界面底部提示「配置保存在 AppData」：`configPath` 来自 `loadData()` 的 `configPath` 字段。
+底栏「配置保存在 AppData」可点击；`configPath` 来自 `loadData().configPath`。
 
 ---
 
@@ -330,26 +358,32 @@ flowchart TB
 
 | 文件 | 职责 |
 | --- | --- |
-| `electron/main.cjs` | `getConfigPath`、`ensureDataFile`、`loadData`、`saveData`、`normalizeData`、`persistServerUidState`、`data:*` IPC |
-| `electron/preload.cjs` | `loadData` / `saveData` / `getConfigPath` |
-| `src/App.vue` | `load()`、`persist()`、`normalizeServer`、`snapshotServers` |
-| `src/components/SettingsDialog.vue` | 编辑本地副本，`saved` 事件触发保存 |
-| `electron/codegen.cjs` | 生码规则（不读写盘，参数来自配置对象） |
-| `electron/updater.cjs` | 使用 `updateUrl`（由 `saveData` / 启动时注入） |
-| `README.md` | 用户向一句话说明 AppData 路径 |
+| `electron/main.cjs` | 配置读写、`persistServerUidState`、`openConfigFile`、`data:*` IPC |
+| `electron/preload.cjs` | `loadData` / `saveData` / `getConfigPath` / `openConfigFile` |
+| `src/App.vue` | `load()`、`persist()`、底栏打开配置、定时/一键交互 |
+| `src/components/SettingsDialog.vue` | 编辑本地副本，`saved` → `persist(true)` |
+| `electron/codegen.cjs` | 生码规则（不直接读写盘） |
+| `electron/updater.cjs` | `updateUrl`（由 `saveData` / 启动时注入） |
+| `README.md` | 用户向功能与项目结构说明 |
 
 ---
 
 ## 12. 常见问题
 
 **Q：改了设置但发码仍像旧参数？**  
-A：确认主界面或设置里已保存；发码 IPC 会 `loadData()` 合并磁盘参数。若仅改了未保存的表格，点设置「保存」或主界面「保存配置」。
+A：设置弹窗需点「保存」；发码 IPC 会 `loadData()` 合并磁盘。若刚改主界面待发内容，需等 `persist()` 完成或点「保存配置」。
 
 **Q：生成码后 `uidSeq` 变了但重启又对不上？**  
-A：检查是否 `persist()` / `persistServerUidState` 失败；查看 `config.json` 内对应 `uidSeq` 是否更新。
+A：主进程 `persistServerUidState` 与界面 `persist()` 都会写盘；查看 `config.json` 中对应字段是否已更新。
+
+**Q：为什么打开 `config.json` 报错，打开 `.txt` 正常？**  
+A：Windows 对 `.json` 常无默认应用。请用程序内「打开配置」（记事本打开），勿依赖资源管理器双击。
+
+**Q：`enableBatch` 与「定时发送码」关系？**  
+A：`enableBatch` 只控制是否加入顶栏一键发送；未勾选一键发码的设备在一键发送运行中仍可单独定时发码；仅参与一键的设备会互斥。
 
 **Q：两个 Electron 实例同时开？**  
 A：同一路径 `config.json` 会被后写覆盖，不建议多开。
 
 **Q：配置与 Electron `userData` 关系？**  
-A：本项目 **刻意** 使用 `appData/HansChaoyun/TCPServerSim`，仅在 **迁移** 时读取旧 `userData` 下的 json，日常不再写入那里。
+A：本项目使用 `appData/HansChaoyun/TCPServerSim`；仅在 **迁移** 时读取旧 `userData` 下的 json，日常不再写入那里。

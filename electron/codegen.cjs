@@ -6,9 +6,13 @@
  * 类型 读码器：
  *   完整码 = 前缀 + 码体 + [后缀] + [:01/:02...]
  *   后缀：有填则拼在码体后、启用 ID 的 :01 前
- *   码体（码长度读配置）：
- *     - 总长度 > 5：前段(0-9a-zA-Z, 长度-5)固定 + 尾部5位自增
- *     - 总长度 ≤ 5：整段随机，不变尾数
+ *   码长含义按前缀自动判断（无需单独开关）：
+ *     - URL/路径类前缀（含 ://、/ 等）：码长 = 码体位数，完整码 = 前缀 + 码体
+ *     - 其它短前缀：码长 = 整条码上限（如 OK+码长 2→OK；O+码长 2→O+1 位码体）
+ *   码体规则：
+ *     - 码体长度 > 5：每条随机前段 + 尾部5位自增（同批各条前段不同）
+ *     - 码体长度 2~5：前段随机 + 尾部 (长度-1) 位自增
+ *     - 码体长度 1：1位随机，不递增
  *   码包优先；启用ID 时拼 :01,:02,:03...
  */
 
@@ -18,6 +22,39 @@ function clampCodeLength(v) {
   const n = Number(v)
   if (!Number.isFinite(n) || n < 1) return 1
   return Math.floor(n)
+}
+
+/** 码长度为整条码上限：前缀占用的长度不再生成码体 */
+function readerCodeLayout(codeLength, prefix) {
+  const total = clampCodeLength(codeLength)
+  const p = String(prefix || '')
+  if (p.length >= total) {
+    return { emitPrefix: p.slice(0, total), bodyLength: 0 }
+  }
+  return { emitPrefix: p, bodyLength: total - p.length }
+}
+
+function isUrlLikePrefix(prefix) {
+  const p = String(prefix || '')
+  return /:\/\//.test(p) || /[/\?#]/.test(p)
+}
+
+/** 按前缀内容解析：URL 类→码长指码体；短前缀→码长指整条码 */
+function resolveReaderLengths(serverCfg) {
+  const prefix = String(serverCfg.prefix || '')
+  const codeLength = clampCodeLength(serverCfg.codeLength)
+  if (isUrlLikePrefix(prefix)) {
+    return { emitPrefix: prefix, bodyLength: codeLength }
+  }
+  return readerCodeLayout(codeLength, prefix)
+}
+
+function prefixOnlyCodes(emitPrefix, count) {
+  const n = Math.max(0, Number(count) || 0)
+  const p = String(emitPrefix || '')
+  if (!n) return []
+  if (!p) return Array.from({ length: n }, () => '')
+  return Array.from({ length: n }, () => p)
 }
 
 function normalizeSeq(v) {
@@ -35,7 +72,7 @@ function randomChars(len) {
   return out
 }
 
-/** 仅当码长度 > 5 时需要固定前段 */
+/** 码长度 > 5：固定前段长度为 len-5 */
 function ensureUidHead(head, codeLength) {
   const len = clampCodeLength(codeLength)
   if (len <= 5) return ''
@@ -50,8 +87,11 @@ function nextSeq(seq) {
   return seq >= 99999 ? 0 : seq + 1
 }
 
-function formatTail(seq) {
-  return String(normalizeSeq(seq)).padStart(5, '0')
+function formatTail(seq, tailDigits = 5) {
+  const d = Math.max(1, Math.min(5, Math.floor(Number(tailDigits) || 5)))
+  const max = 10 ** d - 1
+  const n = normalizeSeq(seq) % (max + 1)
+  return String(n).padStart(d, '0')
 }
 
 function withPrefix(code, prefix) {
@@ -80,8 +120,9 @@ function finalizeCodes(prefixed, { enableId, suffix }) {
 }
 
 /**
- * 码长度 > 5：前段固定 + 尾部5位自增
- * 码长度 ≤ 5：整段随机，不变尾数
+ * 码长度 > 5：每条随机前段 + 5 位流水尾
+ * 码长度 2~5：随机前段 + 流水尾（尾数位 = 码长 - 1）
+ * 码长度 1：单字符随机
  */
 function buildUidBodies(serverCfg, count) {
   const codeLength = clampCodeLength(serverCfg.codeLength)
@@ -89,20 +130,21 @@ function buildUidBodies(serverCfg, count) {
   let seq = normalizeSeq(serverCfg.uidSeq == null ? 1 : serverCfg.uidSeq)
   const bodies = []
 
-  if (codeLength <= 5) {
+  if (codeLength <= 1) {
     for (let i = 0; i < n; i++) {
-      bodies.push(randomChars(codeLength))
+      bodies.push(randomChars(1))
     }
     return { bodies, uidSeq: seq, uidHead: '' }
   }
 
-  const uidHead = ensureUidHead(serverCfg.uidHead, codeLength)
+  const tailDigits = codeLength <= 5 ? codeLength - 1 : 5
+  const headLen = codeLength <= 5 ? 1 : codeLength - 5
   for (let i = 0; i < n; i++) {
-    bodies.push(`${uidHead}${formatTail(seq)}`)
+    bodies.push(`${randomChars(headLen)}${formatTail(seq, tailDigits)}`)
     seq = nextSeq(seq)
   }
 
-  return { bodies, uidSeq: seq, uidHead }
+  return { bodies, uidSeq: seq, uidHead: '' }
 }
 
 function withIdSuffix(codes) {
@@ -124,18 +166,27 @@ function generateCodes(serverCfg, deps = {}) {
   const enableId = serverCfg.enableId === true || serverCfg.enableId === 1 || serverCfg.enableId === 'true'
   const prefix = String(serverCfg.prefix || '')
   const suffix = String(serverCfg.suffix || '')
-  const codeLength = clampCodeLength(serverCfg.codeLength)
+  const { emitPrefix, bodyLength } = resolveReaderLengths(serverCfg)
   const type = String(serverCfg.type || '').trim()
   const getRemain = deps.getPackageRemain || (() => 0)
   const takePkg = deps.takeFromPackage || (() => ({ taken: [], remain: 0 }))
 
   let uidSeq = normalizeSeq(serverCfg.uidSeq == null ? 1 : serverCfg.uidSeq)
-  let uidHead = ensureUidHead(serverCfg.uidHead, codeLength)
+  let uidHead = ensureUidHead(serverCfg.uidHead, bodyLength)
   let fromPackage = 0
   let packageRemain = 0
   let source = 'uid'
   let bodies = []
-  const cfg = { ...serverCfg, codeLength, uidSeq, uidHead }
+  const cfg = { ...serverCfg, codeLength: bodyLength, uidSeq, uidHead }
+
+  const joinBodies = (rawBodies) => {
+    if (bodyLength <= 0) {
+      return rawBodies
+        .map((c) => String(c || '').trim())
+        .filter((c) => c.length > 0)
+    }
+    return applyPrefix(rawBodies, emitPrefix)
+  }
 
   // PLC：只发前缀（发送时再加 \r\n）
   if (type === 'PLC') {
@@ -162,16 +213,24 @@ function generateCodes(serverCfg, deps = {}) {
 
     const lack = need - bodies.length
     if (lack > 0) {
-      const built = buildUidBodies(cfg, lack)
-      bodies = bodies.concat(built.bodies)
-      uidSeq = built.uidSeq
-      uidHead = built.uidHead
-      source = 'package+uid'
+      if (bodyLength <= 0) {
+        bodies = bodies.concat(prefixOnlyCodes(emitPrefix, lack))
+        source = 'package+prefix'
+      } else {
+        const built = buildUidBodies(cfg, lack)
+        bodies = bodies.concat(built.bodies)
+        uidSeq = built.uidSeq
+        uidHead = built.uidHead
+        source = 'package+uid'
+      }
     } else {
       source = 'package'
     }
 
-    const prefixed = applyPrefix(bodies, prefix)
+    let prefixed = joinBodies(bodies)
+    if (bodyLength <= 0 && prefixed.length < need) {
+      prefixed = prefixed.concat(prefixOnlyCodes(emitPrefix, need - prefixed.length))
+    }
     const codes = finalizeCodes(prefixed, { enableId, suffix })
     return {
       text: codes.join(','),
@@ -184,11 +243,24 @@ function generateCodes(serverCfg, deps = {}) {
     }
   }
 
+  if (bodyLength <= 0) {
+    const codes = finalizeCodes(prefixOnlyCodes(emitPrefix, need), { enableId, suffix })
+    return {
+      text: codes.join(','),
+      codes,
+      uidSeq,
+      uidHead,
+      fromPackage: 0,
+      packageRemain: getRemain(serverCfg.id),
+      source: 'prefix-only'
+    }
+  }
+
   if (enableId) {
     const built = buildUidBodies(cfg, need)
     uidSeq = built.uidSeq
     uidHead = built.uidHead
-    const prefixed = applyPrefix(built.bodies, prefix)
+    const prefixed = applyPrefix(built.bodies, emitPrefix)
     const codes = finalizeCodes(prefixed, { enableId: true, suffix })
     return {
       text: codes.join(','),
@@ -204,7 +276,7 @@ function generateCodes(serverCfg, deps = {}) {
   const built = buildUidBodies(cfg, need)
   uidSeq = built.uidSeq
   uidHead = built.uidHead
-  const codes = finalizeCodes(applyPrefix(built.bodies, prefix), { enableId: false, suffix })
+  const codes = finalizeCodes(applyPrefix(built.bodies, emitPrefix), { enableId: false, suffix })
   return {
     text: codes.join(','),
     codes,
@@ -224,10 +296,10 @@ function generateBulkCodes(serverCfg, count) {
   const n = Math.max(1, Math.floor(Number(count) || 1))
   const prefix = String(serverCfg.prefix || '')
   const suffix = String(serverCfg.suffix || '')
-  const codeLength = clampCodeLength(serverCfg.codeLength)
+  const { emitPrefix, bodyLength } = resolveReaderLengths(serverCfg)
   const type = String(serverCfg.type || '').trim()
   let uidSeq = normalizeSeq(serverCfg.uidSeq == null ? 1 : serverCfg.uidSeq)
-  const cfg = { ...serverCfg, codeLength, uidSeq, uidHead: ensureUidHead(serverCfg.uidHead, codeLength) }
+  const cfg = { ...serverCfg, codeLength: bodyLength, uidSeq, uidHead: ensureUidHead(serverCfg.uidHead, bodyLength) }
 
   if (type === 'PLC') {
     const text = prefix
@@ -235,15 +307,22 @@ function generateBulkCodes(serverCfg, count) {
     return { codes, uidSeq, uidHead: cfg.uidHead, source: 'plc-prefix' }
   }
 
+  if (bodyLength <= 0) {
+    const codes = finalizeCodes(prefixOnlyCodes(emitPrefix, n), { enableId: false, suffix })
+    return { codes, uidSeq, uidHead: cfg.uidHead, source: 'prefix-only' }
+  }
+
   const built = buildUidBodies(cfg, n)
   uidSeq = built.uidSeq
-  const codes = finalizeCodes(applyPrefix(built.bodies, prefix), { enableId: false, suffix })
+  const codes = finalizeCodes(applyPrefix(built.bodies, emitPrefix), { enableId: false, suffix })
   return { codes, uidSeq, uidHead: built.uidHead, source: 'uid' }
 }
 
 module.exports = {
   UID_CHARS,
   clampCodeLength,
+  readerCodeLayout,
+  resolveReaderLengths,
   normalizeSeq,
   ensureUidHead,
   withPrefix,
